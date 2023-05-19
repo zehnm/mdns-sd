@@ -54,6 +54,7 @@ use std::{
     time::Duration,
     vec,
 };
+use log::info;
 
 /// A simple macro to report all kinds of errors.
 macro_rules! e_fmt {
@@ -387,6 +388,11 @@ impl ServiceDaemon {
     fn exec_command(zc: &mut Zeroconf, command: Command, repeating: bool) {
         match command {
             Command::Browse(ty, next_delay, listener) => {
+                if ty.ends_with("openthread.thread.home.arpa.") || ty.ends_with("_sleep-proxy._udp.local.") {
+                    info!("Ignoring command browse for {ty}");
+                    return;
+                }
+
                 let addr_list: Vec<_> = zc.intf_socks.keys().collect();
                 if let Err(e) = listener.send(ServiceEvent::SearchStarted(format!(
                     "{} on addrs {:?}",
@@ -950,6 +956,10 @@ impl Zeroconf {
     ///
     /// If there is already a `listener`, it will be updated, i.e. overwritten.
     fn add_querier(&mut self, ty: String, listener: Sender<ServiceEvent>) {
+        if ty.ends_with("openthread.thread.home.arpa.") || ty.ends_with("_sleep-proxy._udp.local.") {
+            info!("Ignoring add_query for {ty}");
+            return;
+        }
         self.queriers.insert(ty, listener);
     }
 
@@ -1053,6 +1063,10 @@ impl Zeroconf {
                         && valid_instance_name(&ptr.alias)
                         && now > ptr.get_record().get_created() + wait_in_millis
                     {
+                        if ptr.alias.ends_with("openthread.thread.home.arpa.") || ptr.alias.ends_with("_sleep-proxy._udp.local.") {
+                            info!("Ignoring query_missing_srv for: {}", ptr.alias);
+                            continue;
+                        }
                         self.send_query(&ptr.alias, TYPE_ANY);
                     }
                 }
@@ -1264,6 +1278,11 @@ impl Zeroconf {
         const META_QUERY: &str = "_services._dns-sd._udp.local.";
 
         for question in msg.questions.iter() {
+            if question.entry.name.contains("homekit") ||
+                question.entry.name.ends_with("_sleep-proxy._udp.local.") ||
+                question.entry.name.ends_with("openthread.thread.home.arpa.") {
+                return;
+            }
             debug!("question: {:?}", &question);
             let qtype = question.entry.ty;
 
@@ -1504,8 +1523,20 @@ impl DnsCache {
     /// Update a DNSRecord if already exists, otherwise insert a new record
     fn add_or_update(&mut self, incoming: DnsRecordBox) -> Option<(&DnsRecordBox, bool)> {
         let entry_name = incoming.get_name().to_string();
+        if entry_name.ends_with("openthread.thread.home.arpa.") || entry_name.ends_with("_sleep-proxy._udp.local.") {
+            info!("Ignoring add_or_update for name: {entry_name}");
+            return None;
+        }
         let record_vec = match incoming.get_type() {
-            TYPE_PTR => self.ptr.entry(entry_name).or_default(),
+            TYPE_PTR => {
+                if let Some(ptr) = incoming.any().downcast_ref::<DnsPointer>() {
+                    if ptr.alias.ends_with("openthread.thread.home.arpa.") || ptr.alias.ends_with("_sleep-proxy._udp.local.") {
+                        info!("Ignoring add_or_update TYPE_PTR alias: {} (name: {entry_name})", ptr.alias);
+                        return None;
+                    }
+                }
+                self.ptr.entry(entry_name).or_default()
+            },
             TYPE_SRV => self.srv.entry(entry_name).or_default(),
             TYPE_TXT => self.txt.entry(entry_name).or_default(),
             TYPE_A => self.addr.entry(entry_name).or_default(),
