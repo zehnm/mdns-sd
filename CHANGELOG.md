@@ -1,3 +1,71 @@
+# Version 0.9.3
+
+This is a bugfix release.
+
+* apply interface selections when IP addresses change (#142)
+* Remove un-necessary panic (#144)
+* Always include subtype info if exists (#146)
+
+p.s. Happy Halloween!
+
+# Version 0.9.2
+
+The release includes a bugfix, thanks to @Mornix !
+
+* fix PTR expiration from preventing later service resolution (#140)
+* updated doc comments for `DnsCache::add_or_update`.
+
+# Version 0.9.1
+
+There are no breaking changes.
+
+*  support interface selection (#137)
+
+Added two new methods for `ServiceDaemon`: `enable_interface` and `disable_interface`, and some refactoring.
+
+# Version 0.9.0
+
+* Ssupports IPv6 (#130) (Thanks to @izissise)
+* ServiceInfo: support get_addresses_v4 (#132)
+* bugfix: set address type correctly (#134)
+
+This is a breaking change, including:
+
+- Trait `AsIpv4Addrs` changes to `AsIpAddrs` to support both IPv4 and IPv6.
+- `ServiceInfo::new()` uses the new `AsIpAddrs` trait.
+- `ServiceInfo::get_addresses()` returns both IPv4 and IPv6 addresses, while a new convenience method `get_addresses_v4` returns IPv4 only.
+
+But in general, because the trait hides away details, the user code is likely keeping working without code changes.
+
+Improvements:
+
+* avoid redundant annoucement or query packets (#135)
+
+# Version 0.8.1
+
+* Remove env_logger in dev-dependencies and lower MSRV to 1.60.0. (#128)
+
+# Version 0.8.0
+
+No breaking changes in API. This release brings two potential user-visible changes:
+
+* use UDP socket to signal the daemon for commands. (#125)
+
+This change reduces CPU utilization of the daemon thread as well as its latency to
+the user commands. Internally it uses local UDP sockets to signal the daemon.
+
+* Added the link-local feature to if_addrs in Cargo.toml to enable link-local interfaces in Windows. (#126)
+
+This change makes link-local interfaces visible to users in Windows where they didn't show up previously.
+
+# Version 0.7.5
+
+* Revert the changes in v0.7.4 and support link-local addrs alongside routable addrs. (#122)
+
+# Version 0.7.4 (deprecated)
+
+* Not to use link-local addrs if routable addrs exist (#117)
+
 # Version 0.7.3
 
 ## Highlights

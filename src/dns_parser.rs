@@ -5,10 +5,19 @@
 //! [DnsOutPacket] is the encoded packet for [DnsOutgoing].
 
 #[cfg(feature = "logging")]
-use crate::log::{debug, error};
+use crate::log::debug;
 use crate::{Error, Result, ServiceInfo};
-use if_addrs::Ifv4Addr;
-use std::{any::Any, cmp, collections::HashMap, fmt, net::Ipv4Addr, str, time::SystemTime};
+use if_addrs::Interface;
+use std::{
+    any::Any,
+    cmp,
+    collections::HashMap,
+    convert::TryInto,
+    fmt,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    str,
+    time::SystemTime,
+};
 
 pub(crate) const TYPE_A: u16 = 1; // IPv4 address
 pub(crate) const TYPE_CNAME: u16 = 5;
@@ -73,6 +82,7 @@ pub(crate) struct DnsRecord {
     pub(crate) entry: DnsEntry,
     ttl: u32,     // in seconds, 0 means this record should not be cached
     created: u64, // UNIX time in millis
+    expires: u64, // expires at this UNIX time in millis
 
     /// Support re-query an instance before its PTR record expires.
     /// See https://datatracker.ietf.org/doc/html/rfc6762#section-5.2
@@ -83,10 +93,12 @@ impl DnsRecord {
     fn new(name: &str, ty: u16, class: u16, ttl: u32) -> Self {
         let created = current_time_millis();
         let refresh = get_expiration_time(created, ttl, 80);
+        let expires = get_expiration_time(created, ttl, 100);
         Self {
             entry: DnsEntry::new(name.to_string(), ty, class),
             ttl,
             created,
+            expires,
             refresh,
         }
     }
@@ -95,8 +107,16 @@ impl DnsRecord {
         self.created
     }
 
+    pub(crate) fn get_expire_time(&self) -> u64 {
+        self.expires
+    }
+
+    pub(crate) fn get_refresh_time(&self) -> u64 {
+        self.refresh
+    }
+
     pub(crate) fn is_expired(&self, now: u64) -> bool {
-        get_expiration_time(self.created, self.ttl, 100) <= now
+        now >= self.expires
     }
 
     pub(crate) fn refresh_due(&self, now: u64) -> bool {
@@ -119,6 +139,7 @@ impl DnsRecord {
         self.ttl = other.ttl;
         self.created = other.created;
         self.refresh = get_expiration_time(self.created, self.ttl, 80);
+        self.expires = get_expiration_time(self.created, self.ttl, 100);
     }
 }
 
@@ -134,6 +155,7 @@ pub(crate) trait DnsRecordExt: fmt::Debug {
     fn write(&self, packet: &mut DnsOutPacket);
     fn any(&self) -> &dyn Any;
 
+    /// Returns whether `other` record is considered the same except TTL.
     fn matches(&self, other: &dyn DnsRecordExt) -> bool;
 
     fn get_name(&self) -> &str {
@@ -167,11 +189,11 @@ pub(crate) trait DnsRecordExt: fmt::Debug {
 #[derive(Debug)]
 pub(crate) struct DnsAddress {
     pub(crate) record: DnsRecord,
-    pub(crate) address: Ipv4Addr,
+    pub(crate) address: IpAddr,
 }
 
 impl DnsAddress {
-    pub(crate) fn new(name: &str, ty: u16, class: u16, ttl: u32, address: Ipv4Addr) -> Self {
+    pub(crate) fn new(name: &str, ty: u16, class: u16, ttl: u32, address: IpAddr) -> Self {
         let record = DnsRecord::new(name, ty, class, ttl);
         Self { record, address }
     }
@@ -187,7 +209,10 @@ impl DnsRecordExt for DnsAddress {
     }
 
     fn write(&self, packet: &mut DnsOutPacket) {
-        packet.write_bytes(self.address.octets().as_ref());
+        match self.address {
+            IpAddr::V4(addr) => packet.write_bytes(addr.octets().as_ref()),
+            IpAddr::V6(addr) => packet.write_bytes(addr.octets().as_ref()),
+        };
     }
 
     fn any(&self) -> &dyn Any {
@@ -683,7 +708,7 @@ impl DnsOutgoing {
         &mut self,
         msg: &DnsIncoming,
         service: &ServiceInfo,
-        intf: &Ifv4Addr,
+        intf: &Interface,
     ) {
         let intf_addrs = service.get_addrs_on_intf(intf);
         if intf_addrs.is_empty() {
@@ -739,9 +764,14 @@ impl DnsOutgoing {
         )));
 
         for address in intf_addrs {
+            let t = match address {
+                IpAddr::V4(_) => TYPE_A,
+                IpAddr::V6(_) => TYPE_AAAA,
+            };
+
             self.add_additional_answer(Box::new(DnsAddress::new(
                 service.get_hostname(),
-                TYPE_A,
+                t,
                 CLASS_IN | CLASS_UNIQUE,
                 service.get_host_ttl(),
                 address,
@@ -937,13 +967,6 @@ impl DnsIncoming {
 
             // decode RDATA based on the record type.
             let rec: Option<DnsRecordBox> = match ty {
-                TYPE_A => Some(Box::new(DnsAddress::new(
-                    &name,
-                    ty,
-                    class,
-                    ttl,
-                    self.read_ipv4(),
-                ))),
                 TYPE_CNAME | TYPE_PTR => Some(Box::new(DnsPointer::new(
                     &name,
                     ty,
@@ -975,11 +998,20 @@ impl DnsIncoming {
                     self.read_char_string(),
                     self.read_char_string(),
                 ))),
-                TYPE_AAAA => {
-                    debug!("We don't support IPv6 TYPE_AAAA records");
-                    self.offset += length;
-                    None
-                }
+                TYPE_A => Some(Box::new(DnsAddress::new(
+                    &name,
+                    ty,
+                    class,
+                    ttl,
+                    self.read_ipv4().into(),
+                ))),
+                TYPE_AAAA => Some(Box::new(DnsAddress::new(
+                    &name,
+                    ty,
+                    class,
+                    ttl,
+                    self.read_ipv6().into(),
+                ))),
                 _ => {
                     debug!("Unknown DNS record type");
                     self.offset += length;
@@ -990,7 +1022,7 @@ impl DnsIncoming {
             // sanity check.
             if self.offset != next_offset {
                 return Err(Error::Msg(format!(
-                    "read_name: decode offset error for RData type {} record: {:?} offset: {} expected offset: {}",
+                    "read_others: decode offset error for RData type {} record: {:?} offset: {} expected offset: {}",
                     ty, &rec, self.offset, next_offset,
                 )));
             }
@@ -1024,9 +1056,19 @@ impl DnsIncoming {
     }
 
     fn read_ipv4(&mut self) -> Ipv4Addr {
-        let bytes = &self.data[self.offset..self.offset + 4];
+        let bytes: [u8; 4] = (&self.data)[self.offset..self.offset + 4]
+            .try_into()
+            .unwrap();
         self.offset += bytes.len();
-        Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3])
+        Ipv4Addr::from(bytes)
+    }
+
+    fn read_ipv6(&mut self) -> Ipv6Addr {
+        let bytes: [u8; 16] = (&self.data)[self.offset..self.offset + 16]
+            .try_into()
+            .unwrap();
+        self.offset += bytes.len();
+        Ipv6Addr::from(bytes)
     }
 
     fn read_string(&mut self, length: usize) -> String {
@@ -1035,12 +1077,20 @@ impl DnsIncoming {
         s.to_string()
     }
 
+    /// Reads a domain name at the current location of `self.data`.
+    ///
+    /// See https://datatracker.ietf.org/doc/html/rfc1035#section-3.1 for
+    /// domain name encoding.
     fn read_name(&mut self) -> Result<String> {
         let data = &self.data[..];
         let mut offset = self.offset;
         let mut name = "".to_string();
         let mut at_end = false;
 
+        // From RFC1035:
+        // "...Domain names in messages are expressed in terms of a sequence of labels.
+        // Each label is represented as a one octet length field followed by that
+        // number of octets."
         loop {
             if offset >= data.len() {
                 return Err(Error::Msg(format!(
@@ -1051,6 +1101,10 @@ impl DnsIncoming {
                 )));
             }
             let length = data[offset];
+
+            // From RFC1035:
+            // "...Since every domain name ends with the null label of
+            // the root, a domain name is terminated by a length byte of zero."
             if length == 0 {
                 if !at_end {
                     self.offset = offset + 1;
@@ -1058,8 +1112,8 @@ impl DnsIncoming {
                 break; // The end of the name
             }
 
+            // Check the first 2 bits for possible "Message compression".
             match length & 0xC0 {
-                // Check the first 2 bits
                 0x00 => {
                     // regular utf8 string with length
                     offset += 1;
@@ -1069,13 +1123,14 @@ impl DnsIncoming {
                     offset += length as usize;
                 }
                 0xC0 => {
+                    // Message compression.
+                    // See https://datatracker.ietf.org/doc/html/rfc1035#section-4.1.4
                     let pointer = (u16_from_be_slice(&data[offset..]) ^ 0xC000) as usize;
                     if pointer >= offset {
-                        println!("data: {:x?}", data);
-                        panic!(
-                            "Bad name: pointer {} offset {} self.offset {}",
-                            &pointer, &offset, &self.offset
-                        );
+                        return Err(Error::Msg(format!(
+                            "Bad name with invalid message compression: pointer {} offset {} data (so far): {:x?}",
+                            &pointer, &offset, &data[..offset]
+                        )));
                     }
 
                     if !at_end {
@@ -1085,11 +1140,12 @@ impl DnsIncoming {
                     offset = pointer;
                 }
                 _ => {
-                    error!("self offset {}, data: {:x?}", &self.offset, data);
-                    panic!(
-                        "Bad domain name at length byte 0x{:x} (offset {})",
-                        length, offset
-                    );
+                    return Err(Error::Msg(format!(
+                        "Bad name with invalid length: 0x{:x} offset {}, data (so far): {:x?}",
+                        length,
+                        offset,
+                        &data[..offset]
+                    )));
                 }
             };
         }
@@ -1120,4 +1176,36 @@ fn u32_from_be_slice(s: &[u8]) -> u32 {
 /// by a certain percentage.
 fn get_expiration_time(created: u64, ttl: u32, percent: u32) -> u64 {
     created + (ttl * percent * 10) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DnsIncoming, DnsOutgoing, FLAGS_QR_QUERY, TYPE_PTR};
+
+    #[test]
+    fn test_read_name_invalid_length() {
+        let name = "test_read";
+        let mut out = DnsOutgoing::new(FLAGS_QR_QUERY);
+        out.add_question(name, TYPE_PTR);
+        let data = out.to_packet_data();
+
+        // construct invalid data.
+        let mut data_with_invalid_name_length = data.clone();
+        let name_length_offset = 12;
+
+        // 0x9 is the length of `name`
+        // 0x80 (0b1000_0000) has two leading bits `10`, which is invalid.
+        data_with_invalid_name_length[name_length_offset] = 0x9 | 0b1000_0000;
+
+        // The original data is fine.
+        let incoming = DnsIncoming::new(data);
+        assert!(incoming.is_ok());
+
+        // The data with invalid name length is not fine.
+        let invalid = DnsIncoming::new(data_with_invalid_name_length);
+        assert!(invalid.is_err());
+        if let Err(e) = invalid {
+            println!("error: {}", e);
+        }
+    }
 }

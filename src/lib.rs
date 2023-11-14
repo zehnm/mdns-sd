@@ -56,6 +56,10 @@
 //!         }
 //!     }
 //! });
+//!
+//! // Gracefully shutdown the daemon.
+//! std::thread::sleep(std::time::Duration::from_secs(1));
+//! mdns.shutdown().unwrap();
 //! ```
 //!
 //! ## Example: a server publishs a service and responds to queries.
@@ -70,7 +74,7 @@
 //! // Create a service info.
 //! let service_type = "_mdns-sd-my-test._udp.local.";
 //! let instance_name = "my_instance";
-//! let host_ipv4 = "192.168.1.12";
+//! let ip = "192.168.1.12";
 //! let host_name = "192.168.1.12.local.";
 //! let port = 5200;
 //! let properties = [("property_1", "test"), ("property_2", "1234")];
@@ -79,13 +83,17 @@
 //!     service_type,
 //!     instance_name,
 //!     host_name,
-//!     host_ipv4,
+//!     ip,
 //!     port,
 //!     &properties[..],
 //! ).unwrap();
 //!
 //! // Register with the daemon, which publishes the service.
 //! mdns.register(my_service).expect("Failed to register our service");
+//!
+//! // Gracefully shutdown the daemon
+//! std::thread::sleep(std::time::Duration::from_secs(1));
+//! mdns.shutdown().unwrap();
 //! ```
 //!
 //! # Limitations
@@ -96,7 +104,6 @@
 //! - DNS:    [RFC 1035](https://tools.ietf.org/html/rfc1035)
 //!
 //! We focus on the common use cases at first, and currently have the following limitations:
-//! - Only support IPv4, not IPv6.
 //! - Only support multicast, not unicast send/recv.
 //! - Only support 32-bit or bigger platforms, not 16-bit platforms.
 
@@ -124,10 +131,10 @@ mod service_info;
 
 pub use error::{Error, Result};
 pub use service_daemon::{
-    DaemonEvent, Metrics, ServiceDaemon, ServiceEvent, UnregisterStatus,
+    DaemonEvent, IfKind, Metrics, ServiceDaemon, ServiceEvent, UnregisterStatus,
     SERVICE_NAME_LEN_MAX_DEFAULT,
 };
-pub use service_info::{AsIpv4Addrs, IntoTxtProperties, ServiceInfo, TxtProperties, TxtProperty};
+pub use service_info::{AsIpAddrs, IntoTxtProperties, ServiceInfo, TxtProperties, TxtProperty};
 
 /// A handler to receive messages from [ServiceDaemon]. Re-export from `flume` crate.
 pub use flume::Receiver;
